@@ -37,6 +37,18 @@ import theano
 import theano.tensor as T
 from layers import param_init_fflayer, fflayer
 import numpy as np
+import lasagne
+from utils import init_tparams
+
+from theano.tensor.opt import register_canonicalize
+
+class ConsiderConstant(theano.compile.ViewOp):
+    def grad(self, args, g_outs):
+        return [T.zeros_like(g_out) for g_out in g_outs]
+
+consider_constant = ConsiderConstant()
+register_canonicalize(theano.gof.OpRemove(consider_constant), name='remove_consider_constant_2')
+
 
 '''
 sales[t] to Inventory[t+1]
@@ -90,44 +102,70 @@ def marginalqnetwork(p,sales):
 
     return qv
     
-p = init_params({})
+p = init_tparams(init_params({}))
 
 tsales_curr = T.matrix()
 tinv_curr = T.matrix()
 tsales_next = T.matrix()
+tinv_next = T.matrix()
 
-q = qnetwork(p, tsales, tinv)
-mq = marginalqnetwork(p, tsales)
+q = qnetwork(p, tsales_curr, tinv_curr)
+mq = marginalqnetwork(p, tsales_next)
+q_next = qnetwork(p, tsales_next, tinv_next)
 
-reward = 2.0*tsales - tinv
+reward = 2.0*tsales_curr - tinv_curr
 
-q_loss = T.mean(T.abs_(q - (mq + reward)))
+q_loss = T.mean(T.abs_(q - (consider_constant(mq) + reward)))
 
-mq_loss = T.mean(abs_(
+mq_loss = T.mean(T.abs_(mq - consider_constant(q_next)))
+
+loss = q_loss + mq_loss
 
 '''
 Figure out updates for q and mq.  Both are doing 1-step TD updates.  
 
 '''
 
-run_qnetwork = theano.function([tsales, tinv], outputs = [q])
-run_mqnetwork = theano.function([tsales], outputs = [mq])
+updates = lasagne.updates.adam(q_loss + mq_loss, p.values())
+
+train_method = theano.function([tsales_curr,tinv_curr,tsales_next,tinv_next], outputs=[loss], updates=updates)
+run_q = theano.function([tsales_curr,tinv_curr], outputs = q)
+
+mode = "offpolicy"
+mode = "onpolicy"
+
+def tomat(inp):
+    return np.asarray([[inp]]).astype('float32')
 
 if __name__ == "__main__":
 
     sales = 10.0
 
-    for iteration in range(0,20):
-        inv = basic_policy(sales)
+    for iteration in range(0,2000):
+        if mode == "offpolicy":
+            inv = basic_policy(sales)
+        else:
+            best_inv = -1
+            best_inv_score = -9999.9
+            for inv_try in range(0,20):
+                val = run_q(tomat(sales),tomat(inv_try))
+                print inv_try, val
+                if val > best_inv_score:
+                    best_inv = inv_try
+            inv = best_inv
+
         sales = basic_environment(inv)
 
         inv_mat = np.asarray([[inv]]).astype('float32')
         sales_mat = np.asarray([[sales]]).astype('float32')
 
-        print "qnetwork", run_qnetwork(sales_mat,inv_mat)
-        print "marginal qnetwork", run_mqnetwork(sales_mat)
+        if iteration > 1:
+            r = train_method(sales_last, inv_last, sales_mat, inv_mat)
 
+            print "loss", r
 
+        sales_last = sales_mat
+        inv_last = inv_mat
 
 
 
