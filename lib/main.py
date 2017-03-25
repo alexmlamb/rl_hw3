@@ -39,6 +39,7 @@ from layers import param_init_fflayer, fflayer
 import numpy as np
 import lasagne
 from utils import init_tparams
+import matplotlib.pyplot as plt
 
 from theano.tensor.opt import register_canonicalize
 
@@ -58,6 +59,20 @@ def basic_policy(last_sales):
         return last_sales
     else:
         return int(last_sales / 2.0)
+
+def random_policy(last_sales):
+    return random.randint(0,50)
+
+'''
+Probability of exploring decays in the number of iterations.  
+'''
+def epsilon_greedy(inp, iteration):
+    p_explore = (0.9999)**iteration
+
+    if random.uniform(0,1) < p_explore:
+        return random.randint(0,50)
+    else:
+        return inp
 
 '''
 Sales[t+1] from Inventory[t].  
@@ -83,7 +98,7 @@ def init_params(p):
     sales is an (Nx1) matrix, inventory is an (Nx1) matrix.  
 '''
 def qnetwork(p,sales,inventory):
-    inp = T.concatenate([sales,inventory],axis=1)
+    inp = T.concatenate([sales,inventory],axis=1) / 50.0
     h1 = fflayer(p,inp,options={},prefix='qn_1',activ='lambda x: T.nnet.relu(x)')
     h2 = fflayer(p,h1,options={},prefix='qn_2',activ='lambda x: T.nnet.relu(x)')
     qv = fflayer(p,h2,options={},prefix='qn_3',activ='lambda x: x')
@@ -115,7 +130,7 @@ q_next = qnetwork(p, tsales_next, tinv_next)
 
 reward = 2.0*tsales_curr - tinv_curr
 
-q_loss = T.mean(T.abs_(q - (consider_constant(mq) + reward)))
+q_loss = T.mean(T.abs_(q - (0.5*consider_constant(mq) + reward)))
 
 mq_loss = T.mean(T.abs_(mq - consider_constant(q_next)))
 
@@ -128,31 +143,48 @@ Figure out updates for q and mq.  Both are doing 1-step TD updates.
 
 updates = lasagne.updates.adam(q_loss + mq_loss, p.values())
 
-train_method = theano.function([tsales_curr,tinv_curr,tsales_next,tinv_next], outputs=[loss], updates=updates)
+train_method = theano.function([tsales_curr,tinv_curr,tsales_next,tinv_next], outputs=[loss,reward], updates=updates)
 run_q = theano.function([tsales_curr,tinv_curr], outputs = q)
 
-mode = "offpolicy"
+#mode = "offpolicy"
 mode = "onpolicy"
 
 def tomat(inp):
     return np.asarray([[inp]]).astype('float32')
 
+losses = []
+rewards = []
+loss_ma = None
+reward_ma = None
+
 if __name__ == "__main__":
 
     sales = 10.0
 
-    for iteration in range(0,2000):
+    for iteration in range(0,50000):
         if mode == "offpolicy":
             inv = basic_policy(sales)
+
+
+
         else:
             best_inv = -1
             best_inv_score = -9999.9
             for inv_try in range(0,20):
                 val = run_q(tomat(sales),tomat(inv_try))
-                print inv_try, val
                 if val > best_inv_score:
                     best_inv = inv_try
-            inv = best_inv
+                    best_inv_score = val
+            inv = epsilon_greedy(best_inv,iteration)
+            
+            print "greedy best", best_inv
+            print "buy at", inv
+
+        if iteration % 500 == 0:
+            for inv_try in range(0,50):
+                val = run_q(tomat(sales),tomat(inv_try))
+                print inv_try, val
+
 
         sales = basic_environment(inv)
 
@@ -162,11 +194,29 @@ if __name__ == "__main__":
         if iteration > 1:
             r = train_method(sales_last, inv_last, sales_mat, inv_mat)
 
-            print "loss", r
+            if loss_ma == None:
+                loss_ma = r[0]
+                rewards_ma = r[1][0][0]
+            else:
+                loss_ma = 0.99*loss_ma + 0.01*r[0]
+                rewards_ma = 0.99*rewards_ma + 0.01*r[1][0][0]
+
+            losses.append(loss_ma)
+            rewards.append(rewards_ma)
 
         sales_last = sales_mat
         inv_last = inv_mat
 
+        if iteration % 5000 == 0:
+
+            plt.plot(losses)
+            plt.title("Q-Network TD-Error")
+            plt.show()
+
+            plt.plot(rewards)
+            plt.title("Expected Returns with Exploration")
+            print inv_try, val
+            plt.show()
 
 
 
